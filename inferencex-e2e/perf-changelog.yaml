@@ -9235,3 +9235,13 @@
     - "Add DSV4-Pro GB200 Dynamo+SGLang AgentX: TP8 aggregate C1/C4, 1P1D DEP8/DEP16 C64/C128, 1P1D DEP16/DEP32 C256, and 2P1D DEP16/DEP32 C768/C1024/C1280."
     - "Use SGLang nightly-dev-20260916-c9a8fba9, DSpark block size 6, and HiCache; omit enable-w4a4-mxfp4-megamoe while retaining the MegaMoE all-to-all backend and FP4 indexer."
   pr-link: https://github.com/SemiAnalysisAI/InferenceX/pull/3629
+
+- config-keys:
+    - glm5.2-fp4-b200-dynamo-sglang-agentic-agg
+    - glm5.2-fp4-b200-dynamo-sglang-agentic-disagg
+  scenario-type:
+    - agentic-coding
+  description:
+    - "Disable FP8 conversion of the GLM-5.2 NextN/MTP draft MoE on B200 AgentX so the draft runs at its shipped precision; images, topology, workload and acceptance are unchanged."
+    - "关闭 B200 GLM-5.2 AgentX 对 NextN/MTP draft MoE 的 FP8 转换，使 draft 保持原始发布精度；镜像、拓扑、工作负载和验收不变。"
+  pr-link: https://github.com/SemiAnalysisAI/InferenceX/pull/3400
