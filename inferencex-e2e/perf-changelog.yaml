@@ -9225,3 +9225,13 @@
   description:
     - "Pin GB300 DeepSeek-V4.1-Flash vLLM to nightly ac68c308 with FlashInfer sparse attention, MXFP4 indexer KV, sparse logits, fp8 KV cache, and B300's batching and CUDA graph tiers; use FlashInfer CUTLASS for MXFP8 GEMMs to avoid the CuTe-DSL split-K startup failure."
   pr-link: https://github.com/SemiAnalysisAI/InferenceX/pull/3396
+
+- config-keys:
+    - dsv4-fp4-gb200-dynamo-sglang-agentic-agg
+    - dsv4-fp4-gb200-dynamo-sglang-agentic-disagg
+  scenario-type:
+    - agentic-coding
+  description:
+    - "Add DSV4-Pro GB200 Dynamo+SGLang AgentX: TP8 aggregate C1/C4, 1P1D DEP8/DEP16 C64/C128, 1P1D DEP16/DEP32 C256, and 2P1D DEP16/DEP32 C768/C1024/C1280."
+    - "Use SGLang nightly-dev-20260916-c9a8fba9, DSpark block size 6, and HiCache; omit enable-w4a4-mxfp4-megamoe while retaining the MegaMoE all-to-all backend and FP4 indexer."
+  pr-link: https://github.com/SemiAnalysisAI/InferenceX/pull/3629
