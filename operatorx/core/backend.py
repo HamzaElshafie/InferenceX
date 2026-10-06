@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from importlib import metadata as importlib_metadata
-from typing import Any, Callable
+from typing import Any
 
 from operatorx.core.op import Op
 
@@ -12,6 +13,8 @@ class BackendImpl:
     op_type: str
     prepare: Callable[[Op], Any]
     kernel: Callable[[Any], None]
+    finalize_warmup: Callable[[Any], None] | None = None
+    result_metadata: Callable[[Any], Mapping[str, Any]] | None = None
 
 
 def lookup_versions(*pkg_names: str) -> dict[str, str]:

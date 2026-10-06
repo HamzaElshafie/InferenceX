@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Any
 
 from operatorx.core.op import Op
-from operatorx.core.run import RunInfo, from_dict as _run_from_dict, to_dict as _run_to_dict
-
+from operatorx.core.run import RunInfo
+from operatorx.core.run import from_dict as _run_from_dict
+from operatorx.core.run import to_dict as _run_to_dict
 
 SCHEMA_VERSION = "1"
 
@@ -16,9 +18,10 @@ SCHEMA_VERSION = "1"
 class Result:
     op: Op
     metrics: Mapping[str, float] = field(default_factory=dict)
-    status: str = "ok"            # "ok" | "unsupported" | "error"
-    message: str | None = None    # only set when status != "ok"
-    testlist: str | None = None   # which testlist file produced this op
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    status: str = "ok"  # "ok" | "unsupported" | "error"
+    message: str | None = None  # only set when status != "ok"
+    testlist: str | None = None  # which testlist file produced this op
 
 
 def to_dict(r: Result) -> dict:
@@ -34,6 +37,8 @@ def to_dict(r: Result) -> dict:
         "metrics": dict(r.metrics),
         "status": r.status,
     }
+    if r.metadata:
+        out["metadata"] = dict(r.metadata)
     if r.message is not None:
         out["message"] = r.message
     if r.testlist is not None:
@@ -51,6 +56,7 @@ def _result_from_dict(d: dict) -> Result:
     return Result(
         op=op,
         metrics=d.get("metrics", {}),
+        metadata=d.get("metadata", {}),
         status=d.get("status", "ok"),
         message=d.get("message"),
         testlist=d.get("testlist"),

@@ -21,3 +21,13 @@
   description-zh:
     - 新增明确标注的 Kimi K3 vLLM 基准测试配置，测量 BF16 EP8/TP8 路由专家内核。
     - 在计时前生成本地均匀路由，不包含共享专家、通信或原生 K3 的latent 投影及 SITU 层。
+- date: 2026-10-06
+  pr-link: null
+  operators: [moe_forward]
+  pools: [h100-dgxc]
+  description:
+    - Add a strict single-GPU vLLM DeepSeek-R1-0528 MoE module benchmark with BF16 module inputs, serialized FP8 weights, native routing, routed experts, shared expert, and output combination.
+    - Exclude distributed TP/EP communication; pre-size and lock vLLM workspace after warmup, record the resolved MoE backend and tuning configuration, and clean up one-rank process groups.
+  description-zh:
+    - 新增严格的单 GPU vLLM DeepSeek-R1-0528 MoE 模块基准测试，覆盖 BF16 模块输入、序列化 FP8 权重、原生路由、路由专家、共享专家及输出合并。
+    - 不包含分布式 TP/EP 通信；在预热后完成 vLLM 工作区预分配并锁定，记录实际 MoE 后端与调优配置，并清理单 rank 进程组。

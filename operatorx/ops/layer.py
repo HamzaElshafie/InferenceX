@@ -27,6 +27,20 @@ class MoeForwardArgs:
     #   "single_hot" — every token routes to expert 0 + (top_k-1) random — worst
     #                  case for load imbalance and dispatch.
     expert_distribution: str = "uniform"
+    # Model semantics required by framework-native module implementations.
+    # Older generic backends may leave these unset.
+    model_id: str | None = None
+    hidden_act: str | None = None
+    score_function: str | None = None
+    selection_method: str | None = None
+    normalize_selected_weights: bool | None = None
+    routed_output_scale: float | None = None
+    expert_group_count: int | None = None
+    selected_expert_group_count: int | None = None
+    weight_block_size_n: int | None = None
+    weight_block_size_k: int | None = None
+    input_seed: int = 0
+    weight_seed: int = 0
 
 
 MOE_FORWARD = OpSpec(

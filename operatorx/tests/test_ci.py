@@ -233,7 +233,11 @@ def test_strict_benchmark_writes_actual_status(
             raise RuntimeError("device failed")
         if outcome == "unsupported":
             raise UnsupportedOpError("dtype unsupported")
-        return Result(op=op, metrics={"latency_us": 12.5})
+        return Result(
+            op=op,
+            metrics={"latency_us": 12.5},
+            metadata={"resolved_execution": {"kernel_backend": "fixture"}},
+        )
 
     runner.run = kernel
     monkeypatch.setitem(sys.modules, backend.__name__, backend)
@@ -268,6 +272,33 @@ def test_strict_benchmark_writes_actual_status(
     assert body["rows"][0]["metrics"] == (
         {"latency_us": 12.5} if outcome == "ok" else {}
     )
+    assert body["rows"][0].get("metadata", {}) == (
+        {"resolved_execution": {"kernel_backend": "fixture"}} if outcome == "ok" else {}
+    )
+
+
+@pytest.mark.parametrize(
+    "world_size,expected_events",
+    [(1, ["destroy"]), (2, ["barrier", "destroy"])],
+)
+def test_distributed_cleanup_releases_single_and_multi_rank_groups(
+    monkeypatch, world_size, expected_events
+):
+    import torch.distributed as dist
+
+    events = []
+    monkeypatch.setattr(dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist, "get_world_size", lambda: world_size)
+    monkeypatch.setattr(dist, "barrier", lambda: events.append("barrier"))
+    monkeypatch.setattr(
+        dist,
+        "destroy_process_group",
+        lambda: events.append("destroy"),
+    )
+
+    benchmark._cleanup_distributed()
+
+    assert events == expected_events
 
 
 def test_testlist_loading_and_unknown_selection(tmp_path):
@@ -582,12 +613,21 @@ def test_cleanup_waits_for_delayed_release_but_stays_bounded(
 
 def test_amd_plan_keeps_requested_moe_shard_factors_with_one_gpu():
     result = ci.plan(
-        "mi300x", ["vllm"],
-        {"tiny": [
-            {"type": "moe_gemm", "args": {"num_tokens": 16, "expert_parallel_size": 8}},
-            {"type": "moe_gemm", "args": {"num_tokens": 32, "world_size": 2}},
-        ]},
-        {"vllm": {"image": "rocm:fixture"}}, [1], 50, platforms("mi300x"),
+        "mi300x",
+        ["vllm"],
+        {
+            "tiny": [
+                {
+                    "type": "moe_gemm",
+                    "args": {"num_tokens": 16, "expert_parallel_size": 8},
+                },
+                {"type": "moe_gemm", "args": {"num_tokens": 32, "world_size": 2}},
+            ]
+        },
+        {"vllm": {"image": "rocm:fixture"}},
+        [1],
+        50,
+        platforms("mi300x"),
     )
     cell = result["include"][0]
     assert cell["world_size"] == cell["nodes"] == 1

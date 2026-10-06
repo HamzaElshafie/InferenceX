@@ -16,6 +16,7 @@ overridden with ``--platform``. Backend filter via ``--backends`` (CSV) or env
 ``OPERATORX_BACKENDS``. World size from ``WORLD_SIZE`` env (set by torchrun, or
 manually for TPU); auto-detected for TPU when unset.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -30,7 +31,6 @@ import operatorx.ops  # noqa: F401  populates op registry
 from operatorx import Op, Result, UnsupportedOpError, write_run_result
 from operatorx.clusters import CLUSTER_PLATFORMS
 from operatorx.runtime import runtime_snapshot, utc_now_iso
-
 
 # Package directory contains the checked-in testlists and local results.
 _REPO_ROOT = Path(__file__).resolve().parent
@@ -49,7 +49,8 @@ def _discover_backends(platform: str) -> list[str]:
     except ImportError:
         return []
     return sorted(
-        info.name for info in pkgutil.iter_modules(pkg.__path__)
+        info.name
+        for info in pkgutil.iter_modules(pkg.__path__)
         if not info.name.startswith("_")
     )
 
@@ -60,20 +61,26 @@ def _csv(s: str | None) -> list[str]:
     return [x.strip() for x in s.split(",") if x.strip()]
 
 
-def _load_testlists(names: list[str] | None, directory: Path = TESTLIST_DIR) -> dict[str, list[dict]]:
+def _load_testlists(
+    names: list[str] | None, directory: Path = TESTLIST_DIR
+) -> dict[str, list[dict]]:
     """Returns {testlist_name: [shape_dict, ...]}. Default = all available."""
     available = {p.stem: p for p in sorted(directory.glob("*.json"))}
     if names:
         wanted = {n: available[n] for n in names if n in available}
         missing = [n for n in names if n not in available]
         if missing:
-            raise SystemExit(f"unknown testlist(s): {missing}; available: {sorted(available)}")
+            raise SystemExit(
+                f"unknown testlist(s): {missing}; available: {sorted(available)}"
+            )
     else:
         wanted = available
     return {name: json.loads(path.read_text()) for name, path in wanted.items()}
 
 
-def _backend_supported_ops(platform: str, backends: list[str], strict: bool = False) -> dict[str, set[str]]:
+def _backend_supported_ops(
+    platform: str, backends: list[str], strict: bool = False
+) -> dict[str, set[str]]:
     """Discover per-backend supported op_types from each module's IMPLS list."""
     out: dict[str, set[str]] = {}
     for b in backends:
@@ -81,8 +88,13 @@ def _backend_supported_ops(platform: str, backends: list[str], strict: bool = Fa
             mod = importlib.import_module(f"operatorx.runners.{platform}.backends.{b}")
         except Exception as e:
             if strict:
-                raise RuntimeError(f"requested backend {platform}/{b} cannot be loaded") from e
-            print(f"[run_smoke] backend {platform}/{b} not importable: {e}", file=sys.stderr)
+                raise RuntimeError(
+                    f"requested backend {platform}/{b} cannot be loaded"
+                ) from e
+            print(
+                f"[run_smoke] backend {platform}/{b} not importable: {e}",
+                file=sys.stderr,
+            )
             out[b] = set()
             continue
         out[b] = {impl.op_type for impl in getattr(mod, "IMPLS", [])}
@@ -130,23 +142,58 @@ def _resolve_world_size(platform: str) -> int:
     if platform == "tpu":
         try:
             import jax
+
             return jax.device_count()
         except Exception:
             pass
     return 1
 
 
+def _cleanup_distributed() -> None:
+    """Release any process group created by a framework adapter.
+
+    Frameworks may initialize a one-rank group to reuse their normal tensor-
+    and expert-parallel code paths. Such groups still own NCCL resources and
+    must be destroyed even though no cross-rank communication occurred.
+    """
+
+    try:
+        import torch.distributed as dist
+
+        if not dist.is_initialized():
+            return
+        if dist.get_world_size() > 1:
+            dist.barrier()
+        # A one-rank NCCL group owns resources too, so always destroy it.
+        dist.destroy_process_group()
+    except Exception:
+        # Cleanup must not replace the benchmark's real result with a shutdown
+        # failure. Framework diagnostics still surface the underlying warning.
+        pass
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-    ap.add_argument("--platform", default=None,
-                    help="platform override (otherwise inferred from $OPERATORX_CLUSTER)")
-    ap.add_argument("--testlists", default=None,
-                    help="comma-separated testlist names; default = all in operatorx/testlists/")
-    ap.add_argument("--backends", default=None,
-                    help="comma-separated backend names; default = all for the platform")
+    ap.add_argument(
+        "--platform",
+        default=None,
+        help="platform override (otherwise inferred from $OPERATORX_CLUSTER)",
+    )
+    ap.add_argument(
+        "--testlists",
+        default=None,
+        help="comma-separated testlist names; default = all in operatorx/testlists/",
+    )
+    ap.add_argument(
+        "--backends",
+        default=None,
+        help="comma-separated backend names; default = all for the platform",
+    )
     ap.add_argument("--testlist-dir", type=Path, default=TESTLIST_DIR)
     ap.add_argument("--results-dir", type=Path, default=RESULTS_DIR)
-    ap.add_argument("--strict", action="store_true", help="fail on errors or zero successful rows")
+    ap.add_argument(
+        "--strict", action="store_true", help="fail on errors or zero successful rows"
+    )
     args = ap.parse_args()
 
     run = runtime_snapshot()
@@ -179,7 +226,9 @@ def main() -> int:
     if moe_par_env:
         parts = moe_par_env.split(":")
         if len(parts) != 3:
-            raise SystemExit(f"OPERATORX_MOE_PARALLELISM must be ep:routed_tp:shared_tp; got {moe_par_env!r}")
+            raise SystemExit(
+                f"OPERATORX_MOE_PARALLELISM must be ep:routed_tp:shared_tp; got {moe_par_env!r}"
+            )
         moe_filter = (int(parts[0]), int(parts[1]), int(parts[2]))
 
     # Load runner
@@ -215,46 +264,80 @@ def main() -> int:
             elif shape["type"] == "moe_forward":
                 continue
             for backend in backends:
-                if not args.strict and shape["type"] not in backend_ops.get(backend, set()):
+                if not args.strict and shape["type"] not in backend_ops.get(
+                    backend, set()
+                ):
                     continue  # Strict CI retains unsupported backend/operator pairs.
-                entries.append((
-                    Op(type=shape["type"], args=shape["args"], backend=backend,
-                       name=shape.get("name")),
-                    tl_name,
-                ))
+                entries.append(
+                    (
+                        Op(
+                            type=shape["type"],
+                            args=shape["args"],
+                            backend=backend,
+                            name=shape.get("name"),
+                        ),
+                        tl_name,
+                    )
+                )
 
     if rank == 0:
         print(f"[run_smoke] platform={platform} cluster={run.cluster!r} ws={ws}")
         print(f"[run_smoke] backends={backends}")
-        print(f"[run_smoke] testlists={list(testlists)}  -> {len(entries)} (op,backend) entries")
+        print(
+            f"[run_smoke] testlists={list(testlists)}  -> {len(entries)} (op,backend) entries"
+        )
 
     import time as _time
+
     results: list[Result] = []
     counts = {"ok": 0, "unsupported": 0, "error": 0}
-    out_path = args.results_dir / platform / (run.cluster or "unknown") / f"{run.id}.json"
+    out_path = (
+        args.results_dir / platform / (run.cluster or "unknown") / f"{run.id}.json"
+    )
     for op, tl in entries:
         _t0 = _time.perf_counter()
         try:
             if op.type not in backend_ops.get(op.backend, set()):
-                raise UnsupportedOpError(f"{platform}/{op.backend} has no implementation for {op.type}")
+                raise UnsupportedOpError(
+                    f"{platform}/{op.backend} has no implementation for {op.type}"
+                )
             r = runner_mod.run(op)
-            results.append(Result(op=op, metrics=r.metrics, status="ok",
-                                  testlist=tl))
+            results.append(
+                Result(
+                    op=op,
+                    metrics=r.metrics,
+                    metadata=r.metadata,
+                    status="ok",
+                    testlist=tl,
+                )
+            )
             counts["ok"] += 1
             status = "ok"
             latency_str = f"{r.metrics['latency_us']:>10.2f} us"
         except UnsupportedOpError as e:
-            results.append(Result(op=op, metrics={}, status="unsupported",
-                                  message=str(e), testlist=tl))
+            results.append(
+                Result(
+                    op=op, metrics={}, status="unsupported", message=str(e), testlist=tl
+                )
+            )
             counts["unsupported"] += 1
             status = "unsupported"
             latency_str = "         unsupported"
         except Exception as e:
             import traceback as _tb
-            tb_tail = "".join(_tb.format_exception(type(e), e, e.__traceback__)).splitlines()[-6:]
-            results.append(Result(op=op, metrics={}, status="error",
-                                  message=f"{type(e).__name__}: {e} | tb: " + " || ".join(tb_tail),
-                                  testlist=tl))
+
+            tb_tail = "".join(
+                _tb.format_exception(type(e), e, e.__traceback__)
+            ).splitlines()[-6:]
+            results.append(
+                Result(
+                    op=op,
+                    metrics={},
+                    status="error",
+                    message=f"{type(e).__name__}: {e} | tb: " + " || ".join(tb_tail),
+                    testlist=tl,
+                )
+            )
             counts["error"] += 1
             status = "error"
             latency_str = f"        ERROR ({type(e).__name__})"
@@ -267,14 +350,18 @@ def main() -> int:
             shape_str = " ".join(
                 f"{k}={v}" for k, v in op.args.items() if not k.startswith("dtype")
             )
-            print(f"[ws={ws}] {tl:12} {status:11} {op.type:18} {op.backend:10}  "
-                  f"{latency_str}  wall={wall_s:6.1f}s   {shape_str}", flush=True)
+            print(
+                f"[ws={ws}] {tl:12} {status:11} {op.type:18} {op.backend:10}  "
+                f"{latency_str}  wall={wall_s:6.1f}s   {shape_str}",
+                flush=True,
+            )
         # Release per-op tensors back to the CUDA driver so the next op's
         # allocator sees the full GPU. Without this, PyTorch's caching
         # allocator hangs on to large output buffers and the next big shape
         # OOMs even though the prior tensors are no longer referenced.
         try:
             import torch as _torch
+
             if _torch.cuda.is_available():
                 _torch.cuda.empty_cache()
         except Exception:
@@ -286,15 +373,7 @@ def main() -> int:
         write_run_result(out_path, run, results)
         print(f"\n[run_smoke] {counts} -> {out_path}")
 
-    # Multi-rank cleanup (torch.distributed used by NVIDIA + Trainium)
-    if ws > 1:
-        try:
-            import torch.distributed as dist
-            if dist.is_initialized():
-                dist.barrier()
-                dist.destroy_process_group()
-        except Exception:
-            pass
+    _cleanup_distributed()
 
     return int(args.strict and (counts["error"] > 0 or counts["ok"] == 0))
 

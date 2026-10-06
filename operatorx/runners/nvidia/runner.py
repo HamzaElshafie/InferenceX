@@ -6,7 +6,16 @@ import torch
 
 from operatorx.core import BackendImpl, Op, Result, UnsupportedOpError
 
-_BACKENDS = ["torch", "deepgemm", "flashinfer", "deepep", "sglang", "flashinfer_comm", "sglang_comm", "vllm"]
+_BACKENDS = [
+    "torch",
+    "deepgemm",
+    "flashinfer",
+    "deepep",
+    "sglang",
+    "flashinfer_comm",
+    "sglang_comm",
+    "vllm",
+]
 _DISPATCH: dict[tuple[str, str], BackendImpl] = {}
 _L2_BUF: dict[int, torch.Tensor] = {}
 
@@ -38,6 +47,7 @@ _WARMUP = 5
 _ITERS = 10
 _NUM_BUFFER_SETS = 1
 
+
 def run(op: Op) -> Result:
     _load()
     impl = _DISPATCH.get((op.type, op.backend))
@@ -51,6 +61,9 @@ def run(op: Op) -> Result:
     for i in range(_WARMUP):
         impl.kernel(ctxs[i % _NUM_BUFFER_SETS])
     torch.cuda.synchronize()
+    if impl.finalize_warmup is not None:
+        for context in ctxs:
+            impl.finalize_warmup(context)
 
     starts = [torch.cuda.Event(enable_timing=True) for _ in range(_ITERS)]
     ends = [torch.cuda.Event(enable_timing=True) for _ in range(_ITERS)]
@@ -63,4 +76,7 @@ def run(op: Op) -> Result:
 
     times = sorted(starts[i].elapsed_time(ends[i]) * 1000.0 for i in range(_ITERS))
     median_us = times[_ITERS // 2]
-    return Result(op=op, metrics={"latency_us": median_us})
+    metadata = (
+        dict(impl.result_metadata(ctxs[0])) if impl.result_metadata is not None else {}
+    )
+    return Result(op=op, metrics={"latency_us": median_us}, metadata=metadata)

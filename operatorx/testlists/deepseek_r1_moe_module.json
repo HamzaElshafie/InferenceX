@@ -1,0 +1,33 @@
+[
+  {
+    "type": "moe_forward",
+    "name": "DeepSeek-R1-0528 native MoE module",
+    "args": {
+      "model_id": "deepseek-ai/DeepSeek-R1-0528",
+      "num_tokens": 16,
+      "hidden": 7168,
+      "intermediate": 2048,
+      "num_experts": 256,
+      "top_k": 8,
+      "n_shared_experts": 1,
+      "hidden_act": "silu",
+      "score_function": "sigmoid",
+      "selection_method": "noaux_tc",
+      "normalize_selected_weights": true,
+      "routed_output_scale": 2.5,
+      "expert_group_count": 8,
+      "selected_expert_group_count": 4,
+      "dtype_act": "bf16",
+      "dtype_weight": "fp8",
+      "weight_block_size_n": 128,
+      "weight_block_size_k": 128,
+      "world_size": 1,
+      "expert_parallel_size": 1,
+      "routed_tensor_parallel_size": 1,
+      "shared_tensor_parallel_size": 1,
+      "expert_distribution": "model_native",
+      "input_seed": 17,
+      "weight_seed": 29
+    }
+  }
+]
