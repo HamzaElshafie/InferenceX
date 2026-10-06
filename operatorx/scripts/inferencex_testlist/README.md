@@ -79,11 +79,14 @@ populate `AttentionArch` (mha vs mla, sharded dims) and `MoeArch`
 The rest of the enumerator picks up from there.
 
 DeepSeek configs also populate `Arch.moe_geometry` and `Arch.moe_routing` with
-validated logical MoE dimensions and routing rules. These fields are currently
-metadata for future framework-native benchmarks; the existing testlist entries
-still come from `MoeArch`. Other families leave the new fields unset until their
-model-specific mappings are verified. A missing routing field likewise leaves
-`moe_routing` unset rather than inventing a default.
+validated logical MoE dimensions and routing rules. When the config declares
+FP8 quantization, `Arch.moe_precision` records its tensor dtype, weight format,
+activation scheme, and weight block size. Other quantization methods remain
+unset until their format is modeled explicitly. This is configuration metadata, not
+proof of the dtypes or kernels a framework actually executes. The existing
+testlist entries still come from `MoeArch`. Other families leave these fields
+unset until their model-specific mappings are verified. A missing routing field
+likewise leaves `moe_routing` unset rather than inventing a default.
 
 ## Adding a new parameterisation
 

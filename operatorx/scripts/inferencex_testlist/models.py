@@ -13,7 +13,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from operatorx.core.moe import MoeLayerGeometry, MoeRouting
+from operatorx.core.moe import MoeLayerGeometry, MoePrecision, MoeRouting
 
 _DEFAULT_LOCAL_DIRS = (
     "/models",
@@ -68,6 +68,7 @@ class Arch:
     # Describes MoE layers only; populated as each family gains a validated mapping.
     moe_geometry: MoeLayerGeometry | None = None
     moe_routing: MoeRouting | None = None
+    moe_precision: MoePrecision | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +200,18 @@ def _build_deepseek(cfg: dict[str, Any], name: str) -> Arch:
         if all(field in cfg for field in routing_fields)
         else None
     )
+    quantization = cfg.get("quantization_config")
+    moe_precision = (
+        MoePrecision(
+            tensor_dtype=cfg["torch_dtype"],
+            weight_quant_method=quantization["quant_method"],
+            weight_format=quantization["fmt"],
+            activation_scheme=quantization["activation_scheme"],
+            weight_block_size=tuple(quantization["weight_block_size"]),
+        )
+        if isinstance(quantization, dict) and quantization.get("quant_method") == "fp8"
+        else None
+    )
     return Arch(
         name=name,
         family="deepseek",
@@ -227,6 +240,7 @@ def _build_deepseek(cfg: dict[str, Any], name: str) -> Arch:
         mtp_num_layers=cfg.get("num_nextn_predict_layers", 0) or 0,
         moe_geometry=moe_geometry,
         moe_routing=moe_routing,
+        moe_precision=moe_precision,
     )
 
 

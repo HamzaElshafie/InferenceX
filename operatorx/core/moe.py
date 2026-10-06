@@ -91,3 +91,38 @@ class MoeRouting:
                 raise ValueError("selected_group_count must be a positive integer")
             if self.selected_group_count > self.group_count:
                 raise ValueError("selected_group_count cannot exceed group_count")
+
+
+@dataclass(frozen=True)
+class MoePrecision:
+    """Precision declared by a model config, not a resolved kernel dtype.
+
+    ``tensor_dtype`` is the config's ordinary tensor dtype. A framework must
+    still verify the actual module input/output and internal operand dtypes.
+    """
+
+    tensor_dtype: str
+    weight_quant_method: str
+    weight_format: str
+    activation_scheme: str
+    weight_block_size: tuple[int, int]
+
+    def __post_init__(self) -> None:
+        for name in (
+            "tensor_dtype",
+            "weight_quant_method",
+            "weight_format",
+            "activation_scheme",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty string")
+
+        if (
+            not isinstance(self.weight_block_size, tuple)
+            or len(self.weight_block_size) != 2
+            or any(
+                type(size) is not int or size <= 0 for size in self.weight_block_size
+            )
+        ):
+            raise ValueError("weight_block_size must contain two positive integers")
