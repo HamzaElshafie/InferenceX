@@ -89,7 +89,7 @@ run_until_bench_done() {
 # for clusters that require enroot+pyxis srun (e.g. gb200-nv, where the
 # SLURM user is not in the docker group). Same env contract on both
 # paths; only the per-node container launch differs.
-source "$DI_REPO_DIR/benchmarks/benchmark_lib.sh" --validation-only
+source "$DI_REPO_DIR/benchmarks/check_env.sh"
 check_env_vars \
     LLMD_CONTAINER_ENGINE VLLM_RANDOMIZE_DP_DUMMY_INPUTS VLLM_ENGINE_READY_TIMEOUT_S VLLM_LOGGING_LEVEL UCX_TLS \
     NVSHMEM_REMOTE_TRANSPORT NVSHMEM_IB_ENABLE_IBGDA NVSHMEM_SYMMETRIC_SIZE LLMD_API_SERVER_COUNT

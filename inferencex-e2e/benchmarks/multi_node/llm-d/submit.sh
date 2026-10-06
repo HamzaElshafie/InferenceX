@@ -17,7 +17,7 @@ set -eo pipefail
 # invoking this script).
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 
-source "$REPO_ROOT/benchmarks/benchmark_lib.sh" --validation-only
+source "$REPO_ROOT/benchmarks/check_env.sh"
 check_env_vars \
     SLURM_ACCOUNT SLURM_PARTITION TIME_LIMIT MODEL_PATH MODEL_NAME \
     CONTAINER_IMAGE RUNNER_NAME BENCHMARK_LOGS_DIR GPUS_PER_NODE PREFILL_WORKERS \
