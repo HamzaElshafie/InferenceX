@@ -277,6 +277,63 @@ def test_strict_benchmark_writes_actual_status(
     )
 
 
+def test_trace_measurement_writes_artifact_reference_without_latency(
+    tmp_path, monkeypatch
+):
+    backend = types.ModuleType("operatorx.runners.testgpu.backends.kernel")
+    backend.IMPLS = [types.SimpleNamespace(op_type="gemm")]
+    runner = types.ModuleType("operatorx.runners.testgpu.runner")
+
+    def trace(op, artifact):
+        artifact.path.parent.mkdir(parents=True, exist_ok=True)
+        artifact.path.write_text("raw trace")
+        return Result(
+            op=op,
+            metadata={
+                "measurement_pass": "trace",
+                "trace": {"artifact": {"path": artifact.reference}},
+            },
+        )
+
+    runner.trace = trace
+    monkeypatch.setitem(sys.modules, backend.__name__, backend)
+    monkeypatch.setitem(sys.modules, runner.__name__, runner)
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.delenv("OPERATORX_MOE_PARALLELISM", raising=False)
+    (tmp_path / "tiny.json").write_text(
+        json.dumps([{"type": "gemm", "args": {"m": 2}}])
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "operatorx",
+            "--platform",
+            "testgpu",
+            "--backends",
+            "kernel",
+            "--testlist-dir",
+            str(tmp_path),
+            "--results-dir",
+            str(tmp_path / "output"),
+            "--measurement-pass",
+            "trace",
+            "--strict",
+        ],
+    )
+
+    assert benchmark.main() == 0
+    result_path = next((tmp_path / "output").rglob("*.json"))
+    body = json.loads(result_path.read_text())
+    row = body["rows"][0]
+    assert row["status"] == "ok"
+    assert row["metrics"] == {}
+    artifact_reference = row["metadata"]["trace"]["artifact"]["path"]
+    assert artifact_reference.endswith(".artifacts/0000.trace.json.gz")
+    assert (result_path.parent / artifact_reference).read_text() == "raw trace"
+
+
 @pytest.mark.parametrize(
     "world_size,expected_events",
     [(1, ["destroy"]), (2, ["barrier", "destroy"])],

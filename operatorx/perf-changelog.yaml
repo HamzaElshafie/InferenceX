@@ -44,3 +44,11 @@
     - Expand the strict single-GPU vLLM DeepSeek-R1-0528 MoE module benchmark to decode workloads of 4, 8, 16, 32, and 64 global tokens plus a separate 32768-token prefill workload.
     - Keep model semantics, precision, topology, synthetic fixture, execution mode, and cache policy fixed while recording requested workload identity separately from resolved vLLM execution metadata.
     - Require two identical untimed inputs to produce exactly equal finite outputs with the requested shape and dtype before accepting timing results.
+- date: 2026-10-06
+  pr-link: null
+  operators: [all]
+  pools: [h100-dgxc, h200-dgxc, b200-nscale, b300, gb200, gb300]
+  description:
+    - Add an explicit non-authoritative NVIDIA trace pass that profiles one warmed, cold-L2 operation boundary separately from clean latency measurement.
+    - Preserve a compressed PyTorch Chrome trace with artifact size and SHA-256 integrity metadata, and summarize ordered kernels, CUDA runtime calls, memory copies, streams, and heuristic communication-kernel detection.
+    - Keep shape, stack, FLOP, and memory profiling disabled so the first trace tier captures the execution timeline with less instrumentation overhead; requested and resolved shapes remain adapter metadata.

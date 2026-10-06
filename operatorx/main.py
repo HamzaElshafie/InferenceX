@@ -28,7 +28,13 @@ import sys
 from pathlib import Path
 
 import operatorx.ops  # noqa: F401  populates op registry
-from operatorx import Op, Result, UnsupportedOpError, write_run_result
+from operatorx import (
+    Op,
+    Result,
+    TraceArtifactTarget,
+    UnsupportedOpError,
+    write_run_result,
+)
 from operatorx.clusters import CLUSTER_PLATFORMS
 from operatorx.runtime import runtime_snapshot, utc_now_iso
 
@@ -194,6 +200,12 @@ def main() -> int:
     ap.add_argument(
         "--strict", action="store_true", help="fail on errors or zero successful rows"
     )
+    ap.add_argument(
+        "--measurement-pass",
+        choices=("timing", "trace"),
+        default="timing",
+        help="timing emits clean latency; trace emits a non-authoritative timeline",
+    )
     args = ap.parse_args()
 
     run = runtime_snapshot()
@@ -294,14 +306,30 @@ def main() -> int:
     out_path = (
         args.results_dir / platform / (run.cluster or "unknown") / f"{run.id}.json"
     )
-    for op, tl in entries:
+    artifact_directory = out_path.parent / f"{run.id}.artifacts"
+    for entry_index, (op, tl) in enumerate(entries):
         _t0 = _time.perf_counter()
         try:
             if op.type not in backend_ops.get(op.backend, set()):
                 raise UnsupportedOpError(
                     f"{platform}/{op.backend} has no implementation for {op.type}"
                 )
-            r = runner_mod.run(op)
+            if args.measurement_pass == "timing":
+                r = runner_mod.run(op)
+            else:
+                trace_fn = getattr(runner_mod, "trace", None)
+                if trace_fn is None:
+                    raise UnsupportedOpError(
+                        f"{platform} runner does not support trace measurement"
+                    )
+                artifact_name = f"{entry_index:04d}.trace.json.gz"
+                r = trace_fn(
+                    op,
+                    TraceArtifactTarget(
+                        path=artifact_directory / artifact_name,
+                        reference=f"{artifact_directory.name}/{artifact_name}",
+                    ),
+                )
             results.append(
                 Result(
                     op=op,
@@ -313,7 +341,11 @@ def main() -> int:
             )
             counts["ok"] += 1
             status = "ok"
-            latency_str = f"{r.metrics['latency_us']:>10.2f} us"
+            latency_str = (
+                f"{r.metrics['latency_us']:>10.2f} us"
+                if args.measurement_pass == "timing"
+                else "     trace captured"
+            )
         except UnsupportedOpError as e:
             results.append(
                 Result(

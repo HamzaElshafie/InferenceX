@@ -4,8 +4,15 @@ from importlib import import_module
 
 import torch
 
-from operatorx.core import BackendImpl, Op, Result, UnsupportedOpError
+from operatorx.core import (
+    BackendImpl,
+    Op,
+    Result,
+    TraceArtifactTarget,
+    UnsupportedOpError,
+)
 from operatorx.core.timing import summarize_latencies
+from operatorx.core.trace import summarize_chrome_trace
 
 _BACKENDS = [
     "torch",
@@ -112,6 +119,7 @@ def run(op: Op) -> Result:
     metadata = (
         dict(impl.result_metadata(ctxs[0])) if impl.result_metadata is not None else {}
     )
+    metadata["measurement_pass"] = "timing"
     metadata["timing"] = timing.metadata(
         warmup_count=_WARMUP,
         warmup_policy="same_cache_and_timer_path_as_measurement",
@@ -123,3 +131,69 @@ def run(op: Op) -> Result:
         cache_policy="cold_l2_before_each_measured_invocation",
     )
     return Result(op=op, metrics=timing.metrics(), metadata=metadata)
+
+
+def trace(op: Op, artifact: TraceArtifactTarget) -> Result:
+    """Capture one warmed boundary invocation in a non-authoritative GPU trace.
+
+    Preparation, warmup, workspace finalization, and L2 flushing happen before
+    profiler capture. Only the requested operation boundary is traced. Profiling
+    changes execution, so this pass intentionally emits no latency metric; clean
+    latency remains the responsibility of :func:`run`.
+    """
+
+    _load()
+    impl = _DISPATCH.get((op.type, op.backend))
+    if impl is None:
+        raise UnsupportedOpError(
+            f"nvidia/{op.backend} has no impl for op_type={op.type!r}"
+        )
+
+    context = impl.prepare(op)
+    for _ in range(_WARMUP):
+        _clear_l2()
+        impl.kernel(context)
+    torch.cuda.synchronize()
+    if impl.finalize_warmup is not None:
+        impl.finalize_warmup(context)
+
+    _stabilize_measurement_state(impl, [context])
+    torch.cuda.synchronize()
+    _clear_l2()
+    torch.cuda.synchronize()
+
+    artifact.path.parent.mkdir(parents=True, exist_ok=True)
+    boundary_name = f"operatorx::{op.type}"
+    with (
+        torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            record_shapes=False,
+            profile_memory=False,
+            with_stack=False,
+            with_flops=False,
+        ) as profile,
+        torch.profiler.record_function(boundary_name),
+    ):
+        impl.kernel(context)
+        torch.cuda.synchronize()
+    profile.export_chrome_trace(str(artifact.path))
+
+    metadata = (
+        dict(impl.result_metadata(context)) if impl.result_metadata is not None else {}
+    )
+    metadata["measurement_pass"] = "trace"
+    metadata["trace_capture"] = {
+        "tool": "torch.profiler",
+        "activities": ["cpu", "cuda"],
+        "record_shapes": False,
+        "profile_memory": False,
+        "with_stack": False,
+        "with_flops": False,
+        "warmup_count": _WARMUP,
+        "cache_policy": "cold_l2_before_profiled_boundary",
+    }
+    metadata["trace"] = summarize_chrome_trace(artifact, boundary_name=boundary_name)
+    return Result(op=op, metadata=metadata)
