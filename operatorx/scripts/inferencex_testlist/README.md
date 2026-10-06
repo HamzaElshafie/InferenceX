@@ -78,6 +78,13 @@ populate `AttentionArch` (mha vs mla, sharded dims) and `MoeArch`
 (num_experts, top_k, intermediate, n_shared_experts, optional dense MLP).
 The rest of the enumerator picks up from there.
 
+DeepSeek configs also populate `Arch.moe_geometry` and `Arch.moe_routing` with
+validated logical MoE dimensions and routing rules. These fields are currently
+metadata for future framework-native benchmarks; the existing testlist entries
+still come from `MoeArch`. Other families leave the new fields unset until their
+model-specific mappings are verified. A missing routing field likewise leaves
+`moe_routing` unset rather than inventing a default.
+
 ## Adding a new parameterisation
 
 No action is needed. New `(TP, EP, ISL, OSL, conc, spec-decoding)` tuples added to

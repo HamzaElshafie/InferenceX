@@ -5,13 +5,15 @@ enumerator needs about a model's structure (hidden dims, attention shape,
 MoE config, attention type). Per-arch wrappers translate the various
 HF config layouts (top-level, `text_config`, etc.) into a uniform shape.
 """
+
 from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
+from operatorx.core.moe import MoeLayerGeometry, MoeRouting
 
 _DEFAULT_LOCAL_DIRS = (
     "/models",
@@ -21,10 +23,10 @@ _DEFAULT_LOCAL_DIRS = (
 
 @dataclass(frozen=True)
 class AttentionArch:
-    kind: str                   # "mha" | "mla"
+    kind: str  # "mha" | "mla"
     num_heads: int
     num_kv_heads: int
-    head_dim: int               # MHA: per-head dim. MLA: not directly used (see MLA fields).
+    head_dim: int  # MHA: per-head dim. MLA: not directly used (see MLA fields).
     # MLA-only:
     qk_nope_head_dim: int = 0
     qk_rope_head_dim: int = 0
@@ -39,6 +41,7 @@ class AttentionArch:
 @dataclass(frozen=True)
 class MoeArch:
     """Empty / disabled when this model has no MoE layers."""
+
     num_experts: int = 0
     num_experts_per_tok: int = 0
     moe_intermediate_size: int = 0
@@ -46,18 +49,25 @@ class MoeArch:
     # If the model has dense (non-MoE) layers in addition to MoE layers, set
     # `dense_intermediate_size` so we also emit MLP-GEMM shapes for those.
     dense_intermediate_size: int = 0
-    num_dense_layers: int = 0   # number of leading dense layers (first_k_dense_replace etc.)
+    # Number of leading dense layers (first_k_dense_replace etc.).
+    num_dense_layers: int = 0
 
 
 @dataclass(frozen=True)
 class Arch:
+    """Model dimensions used to enumerate canonical benchmark shapes."""
+
     name: str
-    family: str                 # "deepseek" | "glm" | "kimi" | "minimax" | "gptoss" | "qwen3moe"
+    family: str  # "deepseek" | "glm" | "kimi" | "minimax" | "gptoss" | "qwen3moe"
     hidden_size: int
     num_layers: int
     attention: AttentionArch
     moe: MoeArch
-    mtp_num_layers: int = 0     # additional speculative-decode layers (DeepSeek MTP, Qwen MTP)
+    # Additional speculative-decode layers (DeepSeek MTP, Qwen MTP).
+    mtp_num_layers: int = 0
+    # Describes MoE layers only; populated as each family gains a validated mapping.
+    moe_geometry: MoeLayerGeometry | None = None
+    moe_routing: MoeRouting | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +86,11 @@ def _candidate_paths(model_id: str, extra_dirs: tuple[str, ...]) -> list[str]:
         paths.append(os.path.join(base, model_id.replace("/", "_"), "config.json"))
     # HF default cache layout:
     hf_home = os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface")
-    paths.append(os.path.join(hf_home, "hub", f"models--{model_id.replace('/', '--')}", "snapshots"))
+    paths.append(
+        os.path.join(
+            hf_home, "hub", f"models--{model_id.replace('/', '--')}", "snapshots"
+        )
+    )
     return paths
 
 
@@ -142,6 +156,8 @@ def _family(cfg: dict[str, Any]) -> str:
 
 
 def _build_deepseek(cfg: dict[str, Any], name: str) -> Arch:
+    """Extract DeepSeek dimensions without choosing an execution backend."""
+
     # DeepSeek V3 / R1: qk_nope_head_dim, qk_rope_head_dim, v_head_dim, kv_lora_rank
     #   are all explicit; `head_dim` is absent.
     # DeepSeek V4: head_dim is set (= v_head_dim), qk_rope_head_dim is set,
@@ -154,6 +170,35 @@ def _build_deepseek(cfg: dict[str, Any], name: str) -> Arch:
     if qk_nope is None:
         qk_nope = head_dim_explicit - qk_rope if head_dim_explicit else 0
     kv_lora = cfg.get("kv_lora_rank") or cfg.get("o_lora_rank") or 0
+    shared_expert_count = cfg.get("n_shared_experts") or 0
+    moe_geometry = MoeLayerGeometry(
+        hidden_size=cfg["hidden_size"],
+        routed_expert_count=cfg["n_routed_experts"],
+        experts_per_token=cfg["num_experts_per_tok"],
+        routed_expert_intermediate_size=cfg["moe_intermediate_size"],
+        shared_expert_count=shared_expert_count,
+        shared_expert_intermediate_size=(
+            cfg["moe_intermediate_size"] if shared_expert_count else 0
+        ),
+    )
+    routing_fields = (
+        "scoring_func",
+        "topk_method",
+        "norm_topk_prob",
+        "routed_scaling_factor",
+    )
+    moe_routing = (
+        MoeRouting(
+            score_function=cfg["scoring_func"],
+            selection_method=cfg["topk_method"],
+            normalize_selected_weights=cfg["norm_topk_prob"],
+            routed_output_scale=cfg["routed_scaling_factor"],
+            group_count=cfg.get("n_group"),
+            selected_group_count=cfg.get("topk_group"),
+        )
+        if all(field in cfg for field in routing_fields)
+        else None
+    )
     return Arch(
         name=name,
         family="deepseek",
@@ -172,14 +217,16 @@ def _build_deepseek(cfg: dict[str, Any], name: str) -> Arch:
             sliding_window=cfg.get("sliding_window"),
         ),
         moe=MoeArch(
-            num_experts=cfg["n_routed_experts"],
-            num_experts_per_tok=cfg["num_experts_per_tok"],
-            moe_intermediate_size=cfg["moe_intermediate_size"],
-            n_shared_experts=cfg.get("n_shared_experts", 0),
+            num_experts=moe_geometry.routed_expert_count,
+            num_experts_per_tok=moe_geometry.experts_per_token,
+            moe_intermediate_size=moe_geometry.routed_expert_intermediate_size,
+            n_shared_experts=moe_geometry.shared_expert_count,
             dense_intermediate_size=cfg.get("intermediate_size", 0),
             num_dense_layers=cfg.get("first_k_dense_replace", 0) or 0,
         ),
         mtp_num_layers=cfg.get("num_nextn_predict_layers", 0) or 0,
+        moe_geometry=moe_geometry,
+        moe_routing=moe_routing,
     )
 
 
@@ -259,7 +306,9 @@ def _build_minimax(cfg: dict[str, Any], name: str) -> Arch:
         moe=MoeArch(
             num_experts=cfg.get("num_local_experts", cfg.get("num_experts", 0)),
             num_experts_per_tok=cfg["num_experts_per_tok"],
-            moe_intermediate_size=cfg.get("moe_intermediate_size", cfg.get("intermediate_size", 0)),
+            moe_intermediate_size=cfg.get(
+                "moe_intermediate_size", cfg.get("intermediate_size", 0)
+            ),
             n_shared_experts=cfg.get("n_shared_experts", 0),
             dense_intermediate_size=cfg.get("intermediate_size", 0),
             num_dense_layers=0,
