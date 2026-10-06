@@ -18,6 +18,7 @@ from typing import Any
 import torch
 
 from operatorx.core import BackendImpl, Op, UnsupportedOpError
+from operatorx.core.moe import MoeWorkload
 
 _DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16}
 
@@ -41,8 +42,11 @@ class DeepseekMoeSpec:
     expert_group_count: int
     selected_expert_group_count: int
     activation_dtype: torch.dtype
+    activation_dtype_name: str
     weight_block_size: tuple[int, int]
-    input_seed: int
+    workload: MoeWorkload
+    weight_source: str
+    execution_mode: str
     weight_seed: int
 
     @classmethod
@@ -60,6 +64,9 @@ class DeepseekMoeSpec:
             "selected_expert_group_count",
             "weight_block_size_n",
             "weight_block_size_k",
+            "phase",
+            "global_num_tokens",
+            "workload_source",
         )
         missing = [name for name in required if args.get(name) is None]
         if missing:
@@ -113,6 +120,14 @@ class DeepseekMoeSpec:
             raise UnsupportedOpError(
                 "initial vLLM moe_forward requires serialized FP8 weights"
             )
+        if args.get("weight_source") != "synthetic":
+            raise UnsupportedOpError(
+                "initial vLLM moe_forward requires synthetic weights"
+            )
+        if args.get("execution_mode") != "eager":
+            raise UnsupportedOpError(
+                "initial vLLM moe_forward supports only eager execution"
+            )
         if args["hidden_act"] != "silu":
             raise UnsupportedOpError("vLLM DeepSeek MoE supports SiLU activation")
         if args["selection_method"] != "noaux_tc":
@@ -128,6 +143,28 @@ class DeepseekMoeSpec:
             value = args[name]
             if not isinstance(value, str) or not value.strip():
                 raise UnsupportedOpError(f"{name} must be a non-empty string")
+
+        try:
+            workload = MoeWorkload(
+                phase=args["phase"],
+                global_num_tokens=args["global_num_tokens"],
+                local_num_tokens=args["num_tokens"],
+                routing_input_policy=args.get("expert_distribution", "model_native"),
+                input_seed=args.get("input_seed", 0),
+                source=args["workload_source"],
+            )
+        except ValueError as error:
+            raise UnsupportedOpError(
+                f"invalid vLLM moe_forward workload: {error}"
+            ) from error
+        if workload.global_num_tokens != workload.local_num_tokens:
+            raise UnsupportedOpError(
+                "single-rank vLLM moe_forward requires equal global and local tokens"
+            )
+        if workload.routing_input_policy != "model_native":
+            raise UnsupportedOpError(
+                "vLLM moe_forward requires model_native routing inputs"
+            )
 
         return cls(
             model_id=args["model_id"],
@@ -145,11 +182,14 @@ class DeepseekMoeSpec:
             expert_group_count=args["expert_group_count"],
             selected_expert_group_count=args["selected_expert_group_count"],
             activation_dtype=_DTYPES[args["dtype_act"]],
+            activation_dtype_name=args["dtype_act"],
             weight_block_size=(
                 args["weight_block_size_n"],
                 args["weight_block_size_k"],
             ),
-            input_seed=args.get("input_seed", 0),
+            workload=workload,
+            weight_source=args["weight_source"],
+            execution_mode=args["execution_mode"],
             weight_seed=args.get("weight_seed", 0),
         )
 
@@ -186,6 +226,66 @@ class DeepseekMoeSpec:
             quantization="fp8",
             is_moe=True,
         )
+
+    def requested_workload_metadata(self) -> dict[str, Any]:
+        """Serialize the framework-neutral request separately from execution."""
+
+        return {
+            "model_id": self.model_id,
+            "boundary": "moe_module",
+            "phase": self.workload.phase,
+            "global_num_tokens": self.workload.global_num_tokens,
+            "local_num_tokens": self.workload.local_num_tokens,
+            "input_placement": "single_rank",
+            "routing_input_policy": self.workload.routing_input_policy,
+            "source": self.workload.source,
+            "geometry": {
+                "hidden_size": self.hidden_size,
+                "routed_expert_count": self.num_experts,
+                "experts_per_token": self.top_k,
+                "routed_expert_intermediate_size": self.intermediate_size,
+                "shared_expert_count": self.num_shared_experts,
+                "shared_expert_intermediate_size": self.intermediate_size,
+            },
+            "routing": {
+                "score_function": self.score_function,
+                "selection_method": self.selection_method,
+                "normalize_selected_weights": self.normalize_selected_weights,
+                "routed_output_scale": self.routed_output_scale,
+                "expert_group_count": self.expert_group_count,
+                "selected_expert_group_count": self.selected_expert_group_count,
+            },
+            "precision": {
+                "module_input_dtype": self.activation_dtype_name,
+                "module_output_dtype": self.activation_dtype_name,
+                "weight_precision": "fp8",
+                "weight_block_size": list(self.weight_block_size),
+                "weight_source": self.weight_source,
+            },
+            "topology": {
+                "world_size": 1,
+                "expert_parallel_size": 1,
+                "routed_tensor_parallel_size": 1,
+                "shared_tensor_parallel_size": 1,
+            },
+            "execution_mode": self.execution_mode,
+            "synthetic_fixture": {
+                "hidden_states": {
+                    "distribution": "normal",
+                    "mean": 0.0,
+                    "standard_deviation": 1.0,
+                    "seed": self.workload.input_seed,
+                },
+                "parameters": {
+                    "floating_point_distribution": "normal",
+                    "floating_point_mean": 0.0,
+                    "floating_point_standard_deviation": 0.02,
+                    "quantization_scale_value": 1.0,
+                    "router_correction_bias_value": 0.0,
+                    "seed": self.weight_seed,
+                },
+            },
+        }
 
 
 def _ensure_single_rank_vllm(vllm_config: Any) -> None:
@@ -360,11 +460,54 @@ def _resolved_execution_metadata(
 
     module_type = type(module)
     return {
+        "requested_workload": spec.requested_workload_metadata(),
         "resolved_execution": {
             "framework_module": f"{module_type.__module__}.{module_type.__qualname__}",
             "routed_experts": routed_experts,
             "workspace": {"locked_after_warmup": False},
-        }
+        },
+    }
+
+
+def _validate_repeated_outputs(
+    first: torch.Tensor,
+    second: torch.Tensor,
+    expected: torch.Tensor,
+) -> dict[str, Any]:
+    """Validate the module boundary and identical-input repeatability."""
+
+    expected_shape = tuple(expected.shape)
+    expected_dtype = expected.dtype
+    for iteration, output in enumerate((first, second), start=1):
+        if output.shape != expected_shape:
+            raise RuntimeError(
+                f"vLLM MoE iteration {iteration} returned shape {tuple(output.shape)}, "
+                f"expected {expected_shape}"
+            )
+        if output.dtype != expected_dtype:
+            raise RuntimeError(
+                f"vLLM MoE iteration {iteration} returned dtype {output.dtype}, "
+                f"expected {expected_dtype}"
+            )
+        if not torch.isfinite(output).all().item():
+            raise RuntimeError(
+                f"vLLM MoE iteration {iteration} returned non-finite output"
+            )
+    if not torch.equal(first, second):
+        raise RuntimeError(
+            "vLLM MoE produced different outputs for two identical untimed inputs"
+        )
+
+    return {
+        "status": "passed",
+        "output_shape": list(expected_shape),
+        "output_dtype": str(expected_dtype),
+        "all_values_finite": True,
+        "repeatability": {
+            "comparison": "exact",
+            "untimed_iteration_count": 2,
+            "passed": True,
+        },
     }
 
 
@@ -417,7 +560,7 @@ def prepare(op: Op) -> dict[str, Any]:
 
     module.eval()
     input_generator = torch.Generator(device="cuda")
-    input_generator.manual_seed(spec.input_seed)
+    input_generator.manual_seed(spec.workload.input_seed)
     hidden_states = torch.randn(
         spec.num_tokens,
         spec.hidden_size,
@@ -426,24 +569,17 @@ def prepare(op: Op) -> dict[str, Any]:
         generator=input_generator,
     )
 
-    # This untimed call completes lazy kernel setup and enforces a basic output
-    # correctness gate before the common runner starts warmup and measurement.
+    # These untimed calls complete lazy kernel setup and enforce the output and
+    # repeatability gates before the common runner starts timed warmup.
+    with set_forward_context(None, vllm_config, num_tokens=spec.num_tokens):
+        first_output = module(hidden_states)
     with set_forward_context(None, vllm_config, num_tokens=spec.num_tokens):
         output = module(hidden_states)
     torch.cuda.synchronize()
-    if output.shape != hidden_states.shape:
-        raise RuntimeError(
-            f"vLLM MoE returned shape {tuple(output.shape)}, "
-            f"expected {tuple(hidden_states.shape)}"
-        )
-    if output.dtype != spec.activation_dtype:
-        raise RuntimeError(
-            f"vLLM MoE returned dtype {output.dtype}, expected {spec.activation_dtype}"
-        )
-    if not torch.isfinite(output).all().item():
-        raise RuntimeError("vLLM MoE returned non-finite output")
+    correctness = _validate_repeated_outputs(first_output, output, hidden_states)
 
     metadata = _resolved_execution_metadata(module, hidden_states, spec)
+    metadata["correctness"] = correctness
 
     return {
         "module": module,

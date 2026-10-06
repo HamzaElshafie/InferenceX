@@ -126,3 +126,36 @@ class MoePrecision:
             )
         ):
             raise ValueError("weight_block_size must contain two positive integers")
+
+
+@dataclass(frozen=True)
+class MoeWorkload:
+    """Serving-shaped token workload presented to one MoE module invocation.
+
+    Global and local token counts are separate because a future distributed
+    topology may shard or replicate the logical workload across ranks. They
+    are equal for the current single-rank benchmark.
+    """
+
+    phase: str
+    global_num_tokens: int
+    local_num_tokens: int
+    routing_input_policy: str
+    input_seed: int
+    source: str
+
+    def __post_init__(self) -> None:
+        if self.phase not in {"decode", "prefill"}:
+            raise ValueError("phase must be 'decode' or 'prefill'")
+        for name in ("global_num_tokens", "local_num_tokens"):
+            value = getattr(self, name)
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if self.local_num_tokens > self.global_num_tokens:
+            raise ValueError("local_num_tokens cannot exceed global_num_tokens")
+        if type(self.input_seed) is not int or self.input_seed < 0:
+            raise ValueError("input_seed must be a non-negative integer")
+        for name in ("routing_input_policy", "source"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty string")

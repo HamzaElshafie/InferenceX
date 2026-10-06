@@ -39,6 +39,13 @@ class MoeForwardArgs:
     selected_expert_group_count: int | None = None
     weight_block_size_n: int | None = None
     weight_block_size_k: int | None = None
+    # Workload identity. ``num_tokens`` remains the tensor's local leading
+    # dimension; ``global_num_tokens`` identifies the logical workload.
+    phase: str | None = None
+    global_num_tokens: int | None = None
+    workload_source: str | None = None
+    weight_source: str = "synthetic"
+    execution_mode: str = "eager"
     input_seed: int = 0
     weight_seed: int = 0
 

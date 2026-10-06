@@ -96,6 +96,8 @@ def summarize_latencies(samples_us: Iterable[float]) -> LatencyStatistics:
     mean_us = statistics.fmean(samples)
     if mean_us == 0.0:
         raise ValueError("mean latency must be positive")
+    # These iterations sample the benchmark's broader runtime behavior rather
+    # than exhaust every future execution, so use Bessel-corrected sample SD.
     stddev_us = statistics.stdev(samples, xbar=mean_us)
     cv_percent = stddev_us / mean_us * 100.0
 
