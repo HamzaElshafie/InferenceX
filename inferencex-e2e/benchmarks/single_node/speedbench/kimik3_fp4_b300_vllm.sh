@@ -110,16 +110,6 @@ if [[ ! -f "$SPEEDBENCH_DIR/qualitative.jsonl" ]]; then
     exit 1
 fi
 
-NEED_SHIM=0
-if [[ " $THINKING_MODES " == *" on "*  && -n "$CHAT_TEMPLATE_KWARGS_ON"  ]]; then NEED_SHIM=1; fi
-if [[ " $THINKING_MODES " == *" off "* && -n "$CHAT_TEMPLATE_KWARGS_OFF" ]]; then NEED_SHIM=1; fi
-if [[ "$NEED_SHIM" == "1" ]]; then
-    if ! apply_chat_template_kwargs_shim; then
-        echo "CRITICAL: --chat-template-kwargs shim failed — aborting"
-        exit 1
-    fi
-fi
-
 # Preflight the client flags every cell uses; otherwise a CLI mismatch only shows up
 # as an all-N/A matrix after eight full server starts (~1h). Probe the driver, not
 # `vllm bench serve` (its help exits before the Rust execv), and ask for --help=all
@@ -179,8 +169,6 @@ cleanup_server() {
     fi
 }
 trap 'cleanup_server' EXIT
-
-start_gpu_monitor
 
 declare -A AL_RESULT
 
@@ -285,8 +273,6 @@ for mode in $THINKING_MODES; do
         run_cell "$mode" "$mtp"
     done
 done
-
-stop_gpu_monitor
 
 emit_mode_block() {
     local mode="$1"
