@@ -9336,3 +9336,12 @@
     - "Use schema 2 benchmark client placement in eleven Kimi-K3 GB200 and GB300 AgentX recipes."
     - "Place discovery services on the existing infra node in three H200 AgentX recipes with required telemetry."
   pr-link: https://github.com/SemiAnalysisAI/InferenceX/pull/3755
+
+- config-keys:
+    - minimaxm3-fp8-h200-vllm-agentic-mtp
+  scenario-type:
+    - agentic-coding
+  description:
+    - "Update the MiniMax-M3 H200 vLLM image and enable the FP8 MSA indexer cache."
+    - "Use GPU-resident KV for concurrency 12 and add concurrency 14; remove the Mooncake DRAM-offload variant."
+  pr-link: https://github.com/SemiAnalysisAI/InferenceX/pull/3736
