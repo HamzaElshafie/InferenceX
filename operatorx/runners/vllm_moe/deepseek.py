@@ -9,8 +9,7 @@ request that would imply distributed execution.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,8 +17,16 @@ from typing import Any
 
 import torch
 
-from operatorx.core import BackendImpl, Op, UnsupportedOpError
+from operatorx.core import Op, UnsupportedOpError
 from operatorx.core.moe import MoeWorkload
+from operatorx.runners.vllm_moe.common import (
+    capture_routing_ids,
+    ensure_single_rank_vllm,
+    linear_execution_metadata,
+    qualified_class_name,
+    routing_workload_metadata,
+    validate_repeated_outputs,
+)
 
 _DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16}
 
@@ -226,6 +233,8 @@ class DeepseekMoeSpec:
             dtype=self.activation_dtype,
             quantization="fp8",
             is_moe=True,
+            word_embeddings_untied_by_checkpoint=False,
+            hf_text_config=SimpleNamespace(model_type="deepseek_v3"),
         )
 
     def requested_workload_metadata(self) -> dict[str, Any]:
@@ -289,59 +298,6 @@ class DeepseekMoeSpec:
         }
 
 
-def _ensure_single_rank_vllm(vllm_config: Any) -> None:
-    """Initialize the one-rank vLLM process groups used by its MoE layer."""
-
-    import torch.distributed as dist
-    from vllm.config import set_current_vllm_config
-    from vllm.distributed import init_distributed_environment, initialize_model_parallel
-    from vllm.distributed.parallel_state import model_parallel_is_initialized
-    from vllm.v1.worker.workspace import (
-        init_workspace_manager,
-        is_workspace_manager_initialized,
-        unlock_workspace,
-    )
-
-    if dist.is_initialized():
-        if dist.get_world_size() != 1 or dist.get_rank() != 0:
-            raise UnsupportedOpError(
-                "initial vLLM moe_forward requires a one-rank process group"
-            )
-    else:
-        required_env = (
-            "MASTER_ADDR",
-            "MASTER_PORT",
-            "RANK",
-            "LOCAL_RANK",
-            "WORLD_SIZE",
-        )
-        missing = [name for name in required_env if not os.environ.get(name)]
-        if missing:
-            raise RuntimeError(
-                "vLLM distributed initialization is missing environment variables: "
-                + ", ".join(missing)
-            )
-        init_distributed_environment(
-            world_size=1,
-            rank=0,
-            local_rank=int(os.environ["LOCAL_RANK"]),
-            distributed_init_method="env://",
-            backend="nccl",
-        )
-
-    if not model_parallel_is_initialized():
-        with set_current_vllm_config(vllm_config):
-            initialize_model_parallel(tensor_model_parallel_size=1)
-
-    if not is_workspace_manager_initialized():
-        init_workspace_manager(torch.device("cuda"))
-    else:
-        # The manager is process-global. A preceding benchmark case may have
-        # locked it after warmup, so reopen growth only during preparation for
-        # this case; ``finalize_warmup`` locks it again before measurement.
-        unlock_workspace()
-
-
 @torch.no_grad()
 def _initialize_synthetic_parameters(module: torch.nn.Module, seed: int) -> None:
     """Fill module parameters with deterministic, non-degenerate random values."""
@@ -370,129 +326,6 @@ def _initialize_synthetic_parameters(module: torch.nn.Module, seed: int) -> None
                 )
 
 
-def _qualified_class_name(value: object) -> str:
-    """Return a stable, fully qualified class name for execution metadata."""
-
-    value_type = type(value)
-    return f"{value_type.__module__}.{value_type.__qualname__}"
-
-
-def _linear_execution_metadata(layer: torch.nn.Module) -> dict[str, Any]:
-    """Describe one vLLM linear layer after native weight processing."""
-
-    metadata = {"module_class": _qualified_class_name(layer)}
-    quant_method = getattr(layer, "quant_method", None)
-    if quant_method is None:
-        return metadata
-
-    metadata["linear_method_class"] = _qualified_class_name(quant_method)
-    selected_kernel = getattr(quant_method, "fp8_linear", None)
-    if selected_kernel is not None:
-        metadata["selected_kernel_class"] = _qualified_class_name(selected_kernel)
-    return metadata
-
-
-def _routing_workload_metadata(
-    topk_ids: torch.Tensor,
-    *,
-    num_experts: int,
-    expected_logical_assignments: int,
-    padding_block_size: int | None,
-) -> dict[str, Any]:
-    """Summarize actual routing decisions outside the measured invocation.
-
-    Post-padding work is derived only when the selected implementation exposes
-    its token-block size. For the current Triton grouped-MoE path, aligning every
-    active expert bucket to ``BLOCK_SIZE_M`` is the exact work decomposition used
-    by vLLM's alignment kernel.
-    """
-
-    flat_ids = topk_ids.detach().to(device="cpu", dtype=torch.int64).reshape(-1)
-    logical_assignments = flat_ids.numel()
-    if logical_assignments != expected_logical_assignments:
-        raise RuntimeError(
-            "vLLM routing returned "
-            f"{logical_assignments} assignments, expected "
-            f"{expected_logical_assignments}"
-        )
-    if logical_assignments == 0:
-        raise RuntimeError("vLLM routing returned no expert assignments")
-    if flat_ids.min().item() < 0 or flat_ids.max().item() >= num_experts:
-        raise RuntimeError("vLLM routing returned an expert ID outside model geometry")
-
-    counts = torch.bincount(flat_ids, minlength=num_experts)
-    active_counts = counts[counts > 0]
-    metadata: dict[str, Any] = {
-        "collection_phase": "untimed_validation",
-        "logical_assignment_count": logical_assignments,
-        "active_expert_count": active_counts.numel(),
-        "assignments_per_expert": counts.tolist(),
-        "active_expert_load": {
-            "min": active_counts.min().item(),
-            "mean": active_counts.to(torch.float64).mean().item(),
-            "max": active_counts.max().item(),
-        },
-        # vLLM's current grouped routing has no capacity limit or token dropping.
-        "dropped_assignment_count": 0,
-    }
-    if padding_block_size is not None:
-        if padding_block_size <= 0:
-            raise RuntimeError("resolved MoE padding block size must be positive")
-        padded_counts = (
-            torch.div(
-                active_counts + padding_block_size - 1,
-                padding_block_size,
-                rounding_mode="floor",
-            )
-            * padding_block_size
-        )
-        post_padding_assignments = padded_counts.sum().item()
-        metadata["padding"] = {
-            "block_size": padding_block_size,
-            "post_padding_assignment_count": post_padding_assignments,
-            "padding_assignment_count": post_padding_assignments - logical_assignments,
-            "amplification_ratio": post_padding_assignments / logical_assignments,
-            "derivation": ("sum_of_active_expert_assignments_rounded_up_to_block_size"),
-        }
-    else:
-        metadata["padding"] = {
-            "status": "unavailable",
-            "reason": "selected_backend_does_not_expose_token_block_size",
-        }
-    return metadata
-
-
-@contextmanager
-def _capture_routing_ids(module: torch.nn.Module) -> Iterator[list[torch.Tensor]]:
-    """Capture logical expert IDs during an existing untimed validation call.
-
-    vLLM routers are not necessarily ``torch.nn.Module`` instances. Their
-    explicit capture callback observes logical IDs after native routing and
-    before optional EPLB remapping, which is the correct level for describing
-    the semantic expert-load distribution.
-    """
-
-    captured: list[torch.Tensor] = []
-
-    def capture(topk_ids: torch.Tensor) -> None:
-        if not isinstance(topk_ids, torch.Tensor):
-            raise TypeError(
-                "vLLM router capture did not provide expert IDs as a tensor"
-            )
-        captured.append(topk_ids.detach().clone())
-
-    router = module.experts.router
-    set_capture_fn = getattr(router, "set_capture_fn", None)
-    if set_capture_fn is None:
-        raise RuntimeError("vLLM router does not expose logical-ID capture support")
-
-    set_capture_fn(capture)
-    try:
-        yield captured
-    finally:
-        set_capture_fn(None)
-
-
 def _resolved_execution_metadata(
     module: torch.nn.Module,
     hidden_states: torch.Tensor,
@@ -506,7 +339,7 @@ def _resolved_execution_metadata(
     from vllm.model_executor.layers.fused_moe import fused_moe as fused_moe_impl
 
     experts = module.experts
-    quant_method = experts.quant_method
+    quant_method = experts._quant_method
     backend_value = getattr(quant_method.fp8_backend, "value", quant_method.fp8_backend)
     backend = str(backend_value)
     routed_experts: dict[str, Any] = {
@@ -592,86 +425,44 @@ def _resolved_execution_metadata(
     else:
         shared_expert = {
             "status": "active",
-            "module_class": _qualified_class_name(shared_experts),
+            "module_class": qualified_class_name(shared_experts),
             "overlapped_with_routed_experts": bool(
                 getattr(experts, "use_overlapped", False)
             ),
-            "gate_up_projection": _linear_execution_metadata(
+            "gate_up_projection": linear_execution_metadata(
                 shared_experts.gate_up_proj
             ),
-            "down_projection": _linear_execution_metadata(shared_experts.down_proj),
+            "down_projection": linear_execution_metadata(shared_experts.down_proj),
         }
 
     return {
         "requested_workload": spec.requested_workload_metadata(),
-        "resolved_routing_workload": _routing_workload_metadata(
+        "resolved_routing_workload": routing_workload_metadata(
             topk_ids,
             num_experts=spec.num_experts,
             expected_logical_assignments=spec.num_tokens * spec.top_k,
             padding_block_size=padding_block_size,
         ),
         "resolved_execution": {
-            "framework_module": _qualified_class_name(module),
+            "framework_module": qualified_class_name(module),
             "components": {
-                "router_projection": _linear_execution_metadata(module.gate),
+                "router_projection": linear_execution_metadata(module.gate),
                 "routing": {
-                    "router_class": _qualified_class_name(experts.router),
+                    "router_class": qualified_class_name(experts.router),
                     "selection_method": spec.selection_method,
                 },
                 "routed_experts": {
-                    "module_class": _qualified_class_name(experts),
-                    "quant_method_class": _qualified_class_name(quant_method),
+                    "module_class": qualified_class_name(experts),
+                    "quant_method_class": qualified_class_name(quant_method),
                     **routed_experts,
                 },
                 "shared_expert": shared_expert,
                 "output_combination": {
-                    "owner_class": _qualified_class_name(module),
+                    "owner_class": qualified_class_name(module),
                 },
                 "communication": {"status": "not_active_single_rank"},
             },
             "workspace": {"locked_after_warmup": False},
-        },
-    }
-
-
-def _validate_repeated_outputs(
-    first: torch.Tensor,
-    second: torch.Tensor,
-    expected: torch.Tensor,
-) -> dict[str, Any]:
-    """Validate the module boundary and identical-input repeatability."""
-
-    expected_shape = tuple(expected.shape)
-    expected_dtype = expected.dtype
-    for iteration, output in enumerate((first, second), start=1):
-        if output.shape != expected_shape:
-            raise RuntimeError(
-                f"vLLM MoE iteration {iteration} returned shape {tuple(output.shape)}, "
-                f"expected {expected_shape}"
-            )
-        if output.dtype != expected_dtype:
-            raise RuntimeError(
-                f"vLLM MoE iteration {iteration} returned dtype {output.dtype}, "
-                f"expected {expected_dtype}"
-            )
-        if not torch.isfinite(output).all().item():
-            raise RuntimeError(
-                f"vLLM MoE iteration {iteration} returned non-finite output"
-            )
-    if not torch.equal(first, second):
-        raise RuntimeError(
-            "vLLM MoE produced different outputs for two identical untimed inputs"
-        )
-
-    return {
-        "status": "passed",
-        "output_shape": list(expected_shape),
-        "output_dtype": str(expected_dtype),
-        "all_values_finite": True,
-        "repeatability": {
-            "comparison": "exact",
-            "untimed_iteration_count": 2,
-            "passed": True,
         },
     }
 
@@ -706,7 +497,7 @@ def prepare(op: Op) -> dict[str, Any]:
     vllm_config.model_config = model_config
 
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
-    _ensure_single_rank_vllm(vllm_config)
+    ensure_single_rank_vllm(vllm_config)
 
     previous_dtype = torch.get_default_dtype()
     try:
@@ -737,14 +528,14 @@ def prepare(op: Op) -> dict[str, Any]:
     # These untimed calls complete lazy kernel setup and enforce the output and
     # repeatability gates before the common runner starts timed warmup.
     with (
-        _capture_routing_ids(module) as captured_routing_ids,
+        capture_routing_ids(module) as captured_routing_ids,
         set_forward_context(None, vllm_config, num_tokens=spec.num_tokens),
     ):
         first_output = module(hidden_states)
     with set_forward_context(None, vllm_config, num_tokens=spec.num_tokens):
         output = module(hidden_states)
     torch.cuda.synchronize()
-    correctness = _validate_repeated_outputs(first_output, output, hidden_states)
+    correctness = validate_repeated_outputs(first_output, output, hidden_states)
     if len(captured_routing_ids) != 1:
         raise RuntimeError(
             "vLLM routing instrumentation expected exactly one router invocation; "
@@ -766,44 +557,3 @@ def prepare(op: Op) -> dict[str, Any]:
         "vllm_config": vllm_config,
         "metadata": metadata,
     }
-
-
-@torch.no_grad()
-def kernel(context: dict[str, Any]) -> None:
-    """Execute the complete framework-native MoE boundary."""
-
-    from vllm.forward_context import set_forward_context
-
-    hidden_states = context["hidden_states"]
-    with set_forward_context(
-        None,
-        context["vllm_config"],
-        num_tokens=hidden_states.shape[0],
-    ):
-        context["out"] = context["module"](hidden_states)
-
-
-def finalize_warmup(context: dict[str, Any]) -> None:
-    """Prevent measured iterations from silently growing vLLM scratch memory."""
-
-    from vllm.v1.worker.workspace import lock_workspace
-
-    lock_workspace()
-    context["metadata"]["resolved_execution"]["workspace"]["locked_after_warmup"] = True
-
-
-def result_metadata(context: dict[str, Any]) -> Mapping[str, Any]:
-    """Return resolved execution facts collected outside the timed region."""
-
-    return context["metadata"]
-
-
-IMPLS = [
-    BackendImpl(
-        op_type="moe_forward",
-        prepare=prepare,
-        kernel=kernel,
-        finalize_warmup=finalize_warmup,
-        result_metadata=result_metadata,
-    )
-]

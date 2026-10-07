@@ -61,3 +61,11 @@
     - Record resolved router, routing, routed-expert, shared-expert, output-combination, and communication components, including the selected shared-expert linear kernel class after weight processing.
     - Separate observed trace data from resolved execution metadata, count only GPU activities as physical memory copies, and preserve correlated CUDA runtime submissions without double counting.
     - Label the software eviction-buffer cache policy as best effort rather than claiming hardware-guaranteed L2 invalidation.
+- date: 2026-10-07
+  pr-link: null
+  operators: [moe_forward]
+  pools: [b200-nscale]
+  description:
+    - Pin a Kimi-K3-capable vLLM 0.29 container digest and add a native single-rank KimiMoE adapter with latent projections, SiTU experts, routed normalization, and the shared path.
+    - Initialize routed experts through valid packed MXFP4 weights and native weight finalization while keeping deterministic BF16 input, module validation, and resolved backend metadata outside timing.
+    - Preserve the DeepSeek-R1 adapter through a shared MoE runner and model-specific adapters; reject unsupported model identities and distributed topologies instead of substituting another boundary.
