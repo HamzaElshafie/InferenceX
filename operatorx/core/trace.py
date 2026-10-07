@@ -130,12 +130,12 @@ def summarize_chrome_trace(
         for index, event in enumerate(kernel_events)
     ]
 
-    copy_events = [
-        event
-        for event in events
-        if "memcpy" in _category(event)
-        or "memcpy" in str(event.get("name", "")).casefold()
-    ]
+    # Kineto emits the host-side CUDA API submission and the resulting device
+    # activity as separate events. Classify copies by their GPU activity category,
+    # not by names such as ``cudaMemcpyAsync`` on ``cuda_runtime`` events; those
+    # runtime calls remain available below and share a correlation ID with the
+    # physical transfer they initiated.
+    copy_events = [event for event in events if "memcpy" in _category(event)]
     copy_events.sort(key=lambda event: float(event["ts"]))
     memory_copies = [
         _normalize_event(event, sequence=index, origin_us=origin_us)

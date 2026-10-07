@@ -24,7 +24,7 @@ def test_trace_summary_preserves_order_and_distinguishes_event_types(tmp_path):
             {
                 "ph": "X",
                 "cat": "cuda_runtime",
-                "name": "cudaLaunchKernel",
+                "name": "cudaMemcpyAsync",
                 "ts": 105.0,
                 "dur": 2.0,
                 "args": {"correlation": 17},
@@ -43,7 +43,7 @@ def test_trace_summary_preserves_order_and_distinguishes_event_types(tmp_path):
                 "name": "Memcpy DtoD",
                 "ts": 128.0,
                 "dur": 3.0,
-                "args": {"device": 0, "stream": 7},
+                "args": {"device": 0, "stream": 7, "correlation": 17},
             },
             {
                 "ph": "X",
@@ -98,7 +98,27 @@ def test_trace_summary_preserves_order_and_distinguishes_event_types(tmp_path):
         },
     ]
     assert summary["memory_copy_count"] == 1
+    assert summary["memory_copies"] == [
+        {
+            "sequence": 0,
+            "name": "Memcpy DtoD",
+            "start_offset_us": 28.0,
+            "duration_us": 3.0,
+            "device": 0,
+            "stream": 7,
+            "correlation_id": 17,
+        }
+    ]
     assert summary["cuda_runtime_call_count"] == 1
+    assert summary["cuda_runtime_calls"] == [
+        {
+            "sequence": 0,
+            "name": "cudaMemcpyAsync",
+            "start_offset_us": 5.0,
+            "duration_us": 2.0,
+            "correlation_id": 17,
+        }
+    ]
     assert summary["communication"] == {
         "detection": "kernel_name_heuristic",
         "kernel_count": 1,

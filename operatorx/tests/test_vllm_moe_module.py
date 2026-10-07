@@ -1,9 +1,18 @@
 """Validate the strict vLLM DeepSeek module request before GPU allocation."""
 
+from types import SimpleNamespace
+from typing import Any
+
 import pytest
 import torch
+
 from operatorx.core import UnsupportedOpError
-from operatorx.runners.vllm_moe import DeepseekMoeSpec, _validate_repeated_outputs
+from operatorx.runners.vllm_moe import (
+    DeepseekMoeSpec,
+    _capture_routing_ids,
+    _routing_workload_metadata,
+    _validate_repeated_outputs,
+)
 
 
 def _args(**overrides: object) -> dict[str, object]:
@@ -163,6 +172,55 @@ def test_correctness_gate_reports_repeatable_finite_output() -> None:
             "passed": True,
         },
     }
+
+
+def test_routing_metadata_reports_load_and_exact_grouped_gemm_padding() -> None:
+    topk_ids = torch.tensor([[0, 1], [0, 2], [0, 2]], dtype=torch.int32)
+
+    assert _routing_workload_metadata(
+        topk_ids,
+        num_experts=4,
+        expected_logical_assignments=6,
+        padding_block_size=4,
+    ) == {
+        "collection_phase": "untimed_validation",
+        "logical_assignment_count": 6,
+        "active_expert_count": 3,
+        "assignments_per_expert": [3, 1, 2, 0],
+        "active_expert_load": {"min": 1, "mean": 2.0, "max": 3},
+        "dropped_assignment_count": 0,
+        "padding": {
+            "block_size": 4,
+            "post_padding_assignment_count": 12,
+            "padding_assignment_count": 6,
+            "amplification_ratio": 2.0,
+            "derivation": ("sum_of_active_expert_assignments_rounded_up_to_block_size"),
+        },
+    }
+
+
+def test_router_capture_records_logical_ids_and_unregisters_callback() -> None:
+    class Router:
+        capture_fn: Any = None
+
+        def set_capture_fn(self, capture_fn: Any) -> None:
+            self.capture_fn = capture_fn
+
+        def route(self, topk_ids: torch.Tensor) -> None:
+            assert self.capture_fn is not None
+            self.capture_fn(topk_ids)
+
+    router = Router()
+    module = SimpleNamespace(experts=SimpleNamespace(router=router))
+    topk_ids = torch.tensor([[3, 1], [2, 0]], dtype=torch.int32)
+
+    with _capture_routing_ids(module) as captured:
+        router.route(topk_ids)
+        topk_ids.zero_()
+
+    assert len(captured) == 1
+    assert torch.equal(captured[0], torch.tensor([[3, 1], [2, 0]], dtype=torch.int32))
+    assert router.capture_fn is None
 
 
 @pytest.mark.parametrize(

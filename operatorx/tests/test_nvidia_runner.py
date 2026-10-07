@@ -79,7 +79,9 @@ def test_runner_locks_after_warmup_and_emits_backend_metadata(monkeypatch):
             ),
             "sample_count": 100,
             "timer": "torch.cuda.Event",
-            "cache_policy": "cold_l2_before_each_measured_invocation",
+            "cache_policy": (
+                "cold_l2_best_effort_eviction_before_each_measured_invocation"
+            ),
             "standard_deviation_method": "sample",
             "stability": {
                 "status": "normal",
@@ -180,9 +182,11 @@ def test_trace_profiles_one_finalized_boundary_and_emits_no_latency(
         "with_stack": False,
         "with_flops": False,
         "warmup_count": 10,
-        "cache_policy": "cold_l2_before_profiled_boundary",
+        "cache_policy": "cold_l2_best_effort_eviction_before_profiled_boundary",
     }
-    assert result.metadata["trace"]["artifact"]["path"] == (
+    assert result.metadata["observed_execution"]["trace"]["artifact"]["path"] == (
         "run.artifacts/profile.json.gz"
     )
-    assert result.metadata["trace"]["kernels"][0]["name"] == "fixture_kernel"
+    assert result.metadata["observed_execution"]["trace"]["kernels"][0]["name"] == (
+        "fixture_kernel"
+    )

@@ -52,3 +52,12 @@
     - Add an explicit non-authoritative NVIDIA trace pass that profiles one warmed, cold-L2 operation boundary separately from clean latency measurement.
     - Preserve a compressed PyTorch Chrome trace with artifact size and SHA-256 integrity metadata, and summarize ordered kernels, CUDA runtime calls, memory copies, streams, and heuristic communication-kernel detection.
     - Keep shape, stack, FLOP, and memory profiling disabled so the first trace tier captures the execution timeline with less instrumentation overhead; requested and resolved shapes remain adapter metadata.
+- date: 2026-10-07
+  pr-link: null
+  operators: [moe_forward]
+  pools: [h100-dgxc, h200-dgxc, b200-nscale, b300, gb200, gb300]
+  description:
+    - Capture vLLM's native top-k expert IDs during untimed validation and report logical assignments, per-expert load, active experts, and Triton block-padding amplification alongside timing and trace results.
+    - Record resolved router, routing, routed-expert, shared-expert, output-combination, and communication components, including the selected shared-expert linear kernel class after weight processing.
+    - Separate observed trace data from resolved execution metadata, count only GPU activities as physical memory copies, and preserve correlated CUDA runtime submissions without double counting.
+    - Label the software eviction-buffer cache policy as best effort rather than claiming hardware-guaranteed L2 invalidation.

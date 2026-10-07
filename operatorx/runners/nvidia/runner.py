@@ -128,7 +128,7 @@ def run(op: Op) -> Result:
             "one_untimed_cold_l2_invocation_per_buffer_set_after_finalization"
         ),
         timer="torch.cuda.Event",
-        cache_policy="cold_l2_before_each_measured_invocation",
+        cache_policy="cold_l2_best_effort_eviction_before_each_measured_invocation",
     )
     return Result(op=op, metrics=timing.metrics(), metadata=metadata)
 
@@ -193,7 +193,9 @@ def trace(op: Op, artifact: TraceArtifactTarget) -> Result:
         "with_stack": False,
         "with_flops": False,
         "warmup_count": _WARMUP,
-        "cache_policy": "cold_l2_before_profiled_boundary",
+        "cache_policy": "cold_l2_best_effort_eviction_before_profiled_boundary",
     }
-    metadata["trace"] = summarize_chrome_trace(artifact, boundary_name=boundary_name)
+    metadata["observed_execution"] = {
+        "trace": summarize_chrome_trace(artifact, boundary_name=boundary_name)
+    }
     return Result(op=op, metadata=metadata)
