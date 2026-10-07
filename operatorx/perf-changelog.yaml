@@ -69,3 +69,11 @@
     - Pin a Kimi-K3-capable vLLM 0.29 container digest and add a native single-rank KimiMoE adapter with latent projections, SiTU experts, routed normalization, and the shared path.
     - Initialize routed experts through valid packed MXFP4 weights and native weight finalization while keeping deterministic BF16 input, module validation, and resolved backend metadata outside timing.
     - Preserve the DeepSeek-R1 adapter through a shared MoE runner and model-specific adapters; reject unsupported model identities and distributed topologies instead of substituting another boundary.
+- date: 2026-10-07
+  pr-link: null
+  operators: [moe_forward]
+  pools: [b200-nscale]
+  description:
+    - Add native single-rank Kimi-K3 module cases for decode batches of 4, 8, 16, 32, and 64 tokens plus a separate 32768-token prefill invocation.
+    - Hold model semantics, fixture seeds, precision, topology, execution mode, and cache policy fixed while preserving raw timing samples and separate per-case kernel traces.
+    - Document B200 acceptance evidence, resolved MXFP4 expert implementation, routing diagnostics, observed stream behavior, and the copied-runtime provenance limitation.
