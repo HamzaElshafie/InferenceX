@@ -13,7 +13,7 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
-from operatorx.core.moe import MoeLayerGeometry, MoePrecision, MoeRouting
+from operatorx.core.moe import MoeActivation, MoeLayerGeometry, MoePrecision, MoeRouting
 
 _DEFAULT_LOCAL_DIRS = (
     "/models",
@@ -23,7 +23,7 @@ _DEFAULT_LOCAL_DIRS = (
 
 @dataclass(frozen=True)
 class AttentionArch:
-    kind: str  # "mha" | "mla"
+    kind: str  # "mha" | "mla" | "hybrid_kda_mla" (not yet enumerable)
     num_heads: int
     num_kv_heads: int
     head_dim: int  # MHA: per-head dim. MLA: not directly used (see MLA fields).
@@ -69,6 +69,7 @@ class Arch:
     moe_geometry: MoeLayerGeometry | None = None
     moe_routing: MoeRouting | None = None
     moe_precision: MoePrecision | None = None
+    moe_activation: MoeActivation | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +137,10 @@ def _text_subconfig(raw: dict[str, Any]) -> dict[str, Any]:
 def _family(cfg: dict[str, Any]) -> str:
     arch = (cfg.get("architectures") or [""])[0]
     mt = cfg.get("model_type", "")
+    if mt == "kimi_k3":
+        return "kimi_k3"
+    if mt.startswith("kimi_k3"):
+        raise ValueError(f"Unsupported Kimi K3 model variant: {mt!r}")
     if "Deepseek" in arch or mt.startswith("deepseek"):
         return "deepseek"
     if "Glm" in arch or mt.startswith("glm"):
@@ -304,6 +309,104 @@ def _build_kimi(cfg: dict[str, Any], name: str) -> Arch:
     )
 
 
+def _build_kimi_k3(cfg: dict[str, Any], name: str) -> Arch:
+    """Map K3's nested language-model config to a strict MoE contract."""
+
+    if cfg.get("hidden_act") != "situ":
+        raise ValueError("Kimi K3 requires SiTU experts")
+    if cfg.get("dtype") != "bfloat16":
+        raise ValueError("Kimi K3 module requires bfloat16 tensors")
+    if cfg.get("topk_method") != "noaux_tc":
+        raise ValueError("Kimi K3 requires noaux_tc routing")
+    if cfg.get("moe_router_activation_func") != "sigmoid":
+        raise ValueError("Kimi K3 requires sigmoid routing scores")
+    if cfg.get("use_grouped_topk") is not True:
+        raise ValueError("Kimi K3 requires grouped top-k selection")
+
+    quant = cfg.get("quantization_config")
+    if not isinstance(quant, dict) or quant.get("quant_method") != "compressed-tensors":
+        raise ValueError("Kimi K3 requires compressed-tensors quantization")
+    groups = quant.get("config_groups")
+    if not isinstance(groups, dict) or len(groups) != 1:
+        raise ValueError("Kimi K3 requires one MXFP4 quantization group")
+    group = next(iter(groups.values()))
+    if not isinstance(group, dict) or group.get("format") != "mxfp4-pack-quantized":
+        raise ValueError("Kimi K3 requires packed MXFP4 routed weights")
+    if quant.get("format") != group["format"] or group.get("targets") != ["Linear"]:
+        raise ValueError("Kimi K3 MXFP4 group must target Linear weights")
+    if group.get("input_activations") is not None:
+        raise ValueError("Kimi K3 activation operand format must be backend-resolved")
+    weights = group.get("weights")
+    if not isinstance(weights, dict) or weights.get("num_bits") != 4:
+        raise ValueError("Kimi K3 requires four-bit MXFP4 weights")
+    if not any("shared_experts" in pattern for pattern in quant.get("ignore", [])):
+        raise ValueError("Kimi K3 shared experts must be excluded from MXFP4")
+
+    shared_count = cfg["num_shared_experts"]
+    geometry = MoeLayerGeometry(
+        hidden_size=cfg["hidden_size"],
+        routed_expert_count=cfg["num_experts"],
+        experts_per_token=cfg["num_experts_per_token"],
+        routed_expert_intermediate_size=cfg["moe_intermediate_size"],
+        shared_expert_count=shared_count,
+        shared_expert_intermediate_size=cfg["moe_intermediate_size"],
+        routed_expert_hidden_size=cfg["routed_expert_hidden_size"],
+        routed_output_norm_eps=(
+            cfg["rms_norm_eps"] if cfg["latent_moe_use_norm"] is True else None
+        ),
+    )
+    if geometry.routed_expert_hidden_size == geometry.hidden_size:
+        raise ValueError("Kimi K3 requires a distinct routed latent width")
+    if geometry.routed_output_norm_eps is None:
+        raise ValueError("Kimi K3 requires routed-output RMS normalization")
+
+    routing = MoeRouting(
+        score_function=cfg["moe_router_activation_func"],
+        selection_method=cfg["topk_method"],
+        normalize_selected_weights=cfg["moe_renormalize"],
+        routed_output_scale=cfg["routed_scaling_factor"],
+        group_count=cfg["num_expert_group"],
+        selected_group_count=cfg["topk_group"],
+    )
+    activation = MoeActivation(
+        name=cfg["hidden_act"],
+        gate_beta=cfg["activation_situ_beta"],
+        up_beta=cfg["activation_situ_linear_beta"],
+    )
+    precision = MoePrecision(
+        tensor_dtype=cfg["dtype"],
+        weight_quant_method=quant["quant_method"],
+        weight_format=quant["format"],
+        activation_scheme="framework_selected",
+        weight_group_size=weights["group_size"],
+        shared_weight_dtype=cfg["dtype"],
+    )
+    return Arch(
+        name=name,
+        family="kimi_k3",
+        hidden_size=geometry.hidden_size,
+        num_layers=cfg["num_hidden_layers"],
+        attention=AttentionArch(
+            kind="hybrid_kda_mla",
+            num_heads=cfg["num_attention_heads"],
+            num_kv_heads=cfg["num_key_value_heads"],
+            head_dim=cfg["v_head_dim"],
+        ),
+        moe=MoeArch(
+            num_experts=geometry.routed_expert_count,
+            num_experts_per_tok=geometry.experts_per_token,
+            moe_intermediate_size=geometry.routed_expert_intermediate_size,
+            n_shared_experts=geometry.shared_expert_count,
+            dense_intermediate_size=cfg["intermediate_size"],
+            num_dense_layers=cfg["first_k_dense_replace"],
+        ),
+        moe_geometry=geometry,
+        moe_routing=routing,
+        moe_precision=precision,
+        moe_activation=activation,
+    )
+
+
 def _build_minimax(cfg: dict[str, Any], name: str) -> Arch:
     # MiniMax-M2.5: GQA-style MHA + MoE (no shared experts in published config).
     return Arch(
@@ -388,6 +491,7 @@ _BUILDERS = {
     "deepseek": _build_deepseek,
     "glm": _build_glm,
     "kimi": _build_kimi,
+    "kimi_k3": _build_kimi_k3,
     "minimax": _build_minimax,
     "gptoss": _build_gptoss,
     "qwen3moe": _build_qwen3moe,
@@ -404,4 +508,9 @@ def load_arch(model_id: str, extra_dirs: tuple[str, ...] = _DEFAULT_LOCAL_DIRS) 
     raw = _load_hf_config(model_id, extra_dirs)
     cfg = _text_subconfig(raw)
     family = _family(cfg)
-    return _BUILDERS[family](cfg, name=model_id)
+    try:
+        return _BUILDERS[family](cfg, name=model_id)
+    except KeyError as error:
+        if family == "kimi_k3":
+            raise ValueError(f"Kimi K3 config is missing {error.args[0]!r}") from error
+        raise

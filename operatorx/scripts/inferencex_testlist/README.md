@@ -1,5 +1,7 @@
 # inferencex_testlist
 
+**English** | [中文](README_zh.md)
+
 Derive `operatorx/testlists/*.json` from the InferenceX matrix configs.
 
 ## Approach
@@ -41,6 +43,10 @@ Static enumeration captures canonical shapes, not engine-specific transformation
   enumerated separately. MTP is modeled by inflating the decode token count.
 - Qwen3.5's hybrid linear/full attention layers are modeled as full-attention
   only (linear-attention layers TODO).
+- Kimi K3's hybrid KDA/Gated-MLA attention is not yet enumerated. Its MoE
+  configuration is parsed, but full canonical testlist generation fails clearly
+  rather than mislabeling KDA layers as MLA. Native K3 module cases are a
+  separate, forthcoming path.
 - Engine-version drift is not detected.
 
 If you need engine-faithful shapes, plug in the empirical-trace fingerprint
@@ -78,15 +84,18 @@ populate `AttentionArch` (mha vs mla, sharded dims) and `MoeArch`
 (num_experts, top_k, intermediate, n_shared_experts, optional dense MLP).
 The rest of the enumerator picks up from there.
 
-DeepSeek configs also populate `Arch.moe_geometry` and `Arch.moe_routing` with
+DeepSeek and Kimi K3 configs populate `Arch.moe_geometry` and `Arch.moe_routing` with
 validated logical MoE dimensions and routing rules. When the config declares
 FP8 quantization, `Arch.moe_precision` records its tensor dtype, weight format,
-activation scheme, and weight block size. Other quantization methods remain
-unset until their format is modeled explicitly. This is configuration metadata, not
-proof of the dtypes or kernels a framework actually executes. The existing
-testlist entries still come from `MoeArch`. Other families leave these fields
-unset until their model-specific mappings are verified. A missing routing field
-likewise leaves `moe_routing` unset rather than inventing a default.
+activation scheme, and weight block size. K3 records its routed MXFP4 group size,
+BF16 shared-weight dtype, latent width, post-route RMSNorm, and SiTU parameters.
+Its internal activation operand format is deliberately `framework_selected`:
+the checkpoint config does not establish which operand format vLLM executes.
+These are configuration contracts, not proof of launched kernels. Existing
+canonical testlist entries still come from `MoeArch`; strict framework-native
+module cases must use the full contract. Other families leave these fields unset
+until their model-specific mappings are verified. A missing routing field likewise
+leaves `moe_routing` unset rather than inventing a default.
 
 ## Adding a new parameterisation
 

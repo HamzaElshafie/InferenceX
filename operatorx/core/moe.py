@@ -12,6 +12,8 @@ class MoeLayerGeometry:
 
     The shared-expert intermediate size is the width of *each* shared expert.
     A layer without shared experts sets both shared-expert fields to zero.
+    A missing routed-expert hidden size means experts consume the module's full
+    hidden width. A routed-output norm is applied before the up-projection.
     """
 
     hidden_size: int
@@ -20,6 +22,8 @@ class MoeLayerGeometry:
     routed_expert_intermediate_size: int
     shared_expert_count: int = 0
     shared_expert_intermediate_size: int = 0
+    routed_expert_hidden_size: int | None = None
+    routed_output_norm_eps: float | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -47,6 +51,42 @@ class MoeLayerGeometry:
                 "shared_expert_count and shared_expert_intermediate_size "
                 "must either both be zero or both be positive"
             )
+
+        if self.routed_expert_hidden_size is not None and (
+            type(self.routed_expert_hidden_size) is not int
+            or self.routed_expert_hidden_size <= 0
+        ):
+            raise ValueError("routed_expert_hidden_size must be a positive integer")
+        if self.routed_output_norm_eps is not None and (
+            type(self.routed_output_norm_eps) not in (int, float)
+            or not math.isfinite(self.routed_output_norm_eps)
+            or self.routed_output_norm_eps <= 0
+        ):
+            raise ValueError("routed_output_norm_eps must be positive and finite")
+
+
+@dataclass(frozen=True)
+class MoeActivation:
+    """Expert GLU activation, including SiTU's separate gate and up caps."""
+
+    name: str
+    gate_beta: float | None = None
+    up_beta: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.name not in {"silu", "situ"}:
+            raise ValueError(f"unsupported MoE activation {self.name!r}")
+        if self.name == "situ":
+            for field in ("gate_beta", "up_beta"):
+                value = getattr(self, field)
+                if (
+                    type(value) not in (int, float)
+                    or not math.isfinite(value)
+                    or value <= 0
+                ):
+                    raise ValueError(f"{field} must be positive and finite for SiTU")
+        elif self.gate_beta is not None or self.up_beta is not None:
+            raise ValueError("SiTU beta values are invalid for SiLU")
 
 
 @dataclass(frozen=True)
@@ -99,13 +139,17 @@ class MoePrecision:
 
     ``tensor_dtype`` is the config's ordinary tensor dtype. A framework must
     still verify the actual module input/output and internal operand dtypes.
+    FP8 block and MXFP4 group sizes are distinct weight granularities; shared
+    weights may use the ordinary tensor dtype instead of routed quantization.
     """
 
     tensor_dtype: str
     weight_quant_method: str
     weight_format: str
     activation_scheme: str
-    weight_block_size: tuple[int, int]
+    weight_block_size: tuple[int, int] | None = None
+    weight_group_size: int | None = None
+    shared_weight_dtype: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -118,7 +162,9 @@ class MoePrecision:
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} must be a non-empty string")
 
-        if (
+        if (self.weight_block_size is None) == (self.weight_group_size is None):
+            raise ValueError("exactly one weight granularity must be specified")
+        if self.weight_block_size is not None and (
             not isinstance(self.weight_block_size, tuple)
             or len(self.weight_block_size) != 2
             or any(
@@ -126,6 +172,15 @@ class MoePrecision:
             )
         ):
             raise ValueError("weight_block_size must contain two positive integers")
+        if self.weight_group_size is not None and (
+            type(self.weight_group_size) is not int or self.weight_group_size <= 0
+        ):
+            raise ValueError("weight_group_size must be a positive integer")
+        if self.shared_weight_dtype is not None and (
+            not isinstance(self.shared_weight_dtype, str)
+            or not self.shared_weight_dtype.strip()
+        ):
+            raise ValueError("shared_weight_dtype must be a non-empty string")
 
 
 @dataclass(frozen=True)

@@ -4,15 +4,16 @@ Input: a `WorkloadRow` (one InferenceX matrix entry) and the model `Arch`.
 Output: a list of `(op_type, args_dict, name)` triples that can be folded
 into the testlist JSONs.
 """
+
 from __future__ import annotations
 
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 from .dtypes import OpDtype, RowDtypes, resolve_dtypes
 from .matrix import WorkloadRow
-from .models import Arch, AttentionArch, MoeArch
+from .models import Arch
 from .parallelism import Parallelism
-
 
 OpTriple = tuple[str, dict[str, Any], str]
 
@@ -150,6 +151,8 @@ def _attn_block_gemms(
     H = arch.hidden_size
     a = arch.attention
     tp = par.attn_tp
+    if a.kind not in {"mha", "mla"}:
+        raise ValueError(f"canonical attention shapes are unavailable for {a.kind}")
 
     # GPT-OSS has `attention_bias=True` in its HF config; QKV/O projections
     # all carry biases. Other InferenceX models leave attention_bias=False.
@@ -207,6 +210,8 @@ def _attention_ops(
     arch: Arch, par: Parallelism, row: WorkloadRow, phase: str, dts: RowDtypes
 ) -> Iterable[OpTriple]:
     a = arch.attention
+    if a.kind not in {"mha", "mla"}:
+        raise ValueError(f"canonical attention operations are unavailable for {a.kind}")
     if phase == "prefill":
         # Treat as one big extend step at full ISL (chunked prefill produces
         # the same canonical shape modulo the chunk size, which we don't
